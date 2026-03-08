@@ -3,7 +3,7 @@
 	"Version": 1,
 	"VersionName": "1.0",
 	"FriendlyName": "UETwitchNative",
-	"Description": "A Twitch Native integration for Unreal Engine for handling gameplay events.",
+	"Description": "Reusable Twitch-native interactions (Channel Points, Polls, optional chat) using TwitchSDK.",
 	"Category": "Other",
 	"CreatedBy": "Patrick Barnhardt @crimsonstrife",
 	"CreatedByURL": "",
@@ -14,11 +14,15 @@
 	"IsBetaVersion": true,
 	"IsExperimentalVersion": false,
 	"Installed": false,
+	"EnabledByDefault": false,
 	"Modules": [
 		{
 			"Name": "UETwitchNative",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
 		}
+	],
+	"Plugins": [
+		{ "Name": "TwitchSDK", "Enabled": true }
 	]
 }

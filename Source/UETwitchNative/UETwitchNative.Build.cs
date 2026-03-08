@@ -26,6 +26,10 @@ public class UETwitchNative : ModuleRules
 			new string[]
 			{
 				"Core",
+				"CoreUObject",
+				"Engine",
+				"DeveloperSettings",
+				"HTTP"
 				// ... add other public dependencies that you statically link with here ...
 			}
 			);
@@ -38,6 +42,10 @@ public class UETwitchNative : ModuleRules
 				"Engine",
 				"Slate",
 				"SlateCore",
+				"TwitchSDK",
+				"HTTP",
+				"Json",
+				"JsonUtilities"
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);
