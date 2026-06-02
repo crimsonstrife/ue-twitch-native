@@ -17,6 +17,10 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category="Auth")
 	TArray<FTwitchSDKOAuthScope> DefaultScopes;
 
+	/** If true, the subsystem will attempt to silently restore persisted credentials at Initialize. If no credentials are persisted, no UI is shown until something explicitly calls ConnectUsingProjectSettings. */
+	UPROPERTY(Config, EditAnywhere, Category="Auth")
+	bool bAutoConnectOnStartup = false;
+
 	UPROPERTY(Config, EditAnywhere, Category="Rewards")
 	TSoftObjectPtr<UTwitchNativeRewardPack> DefaultRewardPack;
 

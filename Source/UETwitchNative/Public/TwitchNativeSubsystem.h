@@ -3,6 +3,7 @@
 #include "TwitchNativeRewardPack.h"
 
 #include "Subsystems/GameInstanceSubsystem.h"
+#include "Engine/EngineTypes.h"
 #include "TwitchNativeTypes.h"
 #include "TwitchSDK.h"
 #include "TwitchNativeSubsystem.generated.h"
@@ -18,6 +19,16 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category="Twitch")
 	bool IsTwitchSdkAvailable() const;
+
+	UFUNCTION(BlueprintPure, Category="Twitch")
+	EUETwitchAuthStatus GetAuthStatus() const { return CurrentStatus; }
+
+	UFUNCTION(BlueprintPure, Category="Twitch")
+	bool IsLoggedIn() const { return CurrentStatus == EUETwitchAuthStatus::LoggedIn; }
+
+	/** Query the SDK once for the current auth state and broadcast OnAuthStatusChanged on transition. */
+	UFUNCTION(BlueprintCallable, Category="Twitch")
+	void RefreshAuthStatus();
 
 	UFUNCTION(BlueprintCallable, Category="Twitch")
 	void RequestAuthenticationInfo(const TArray<FTwitchSDKOAuthScope>& Scopes);
@@ -60,12 +71,29 @@ public:
 	FTwitchAuthInfoReceived OnAuthInfoReceived;
 
 	UPROPERTY(BlueprintAssignable, Category="Twitch")
+	FTwitchAuthStatusChanged OnAuthStatusChanged;
+
+	UPROPERTY(BlueprintAssignable, Category="Twitch")
 	FTwitchError OnTwitchError;
 
 	UPROPERTY(BlueprintAssignable, Category="Twitch")
 	FTwitchCustomRewardRedeemed OnCustomRewardRedeemed;
 
 private:
+	// Auth state machine
+	EUETwitchAuthStatus CurrentStatus = EUETwitchAuthStatus::LoggedOut;
+	FTimerHandle AuthPollHandle;
+	double DeviceCodeFlowStartedSeconds = 0.0;
+
+	/** Assign + broadcast only on actual transition. */
+	void SetStatus(EUETwitchAuthStatus NewStatus);
+
+	/** Wraps Core->GetAuthState, marshals result to game thread, invokes OnDone with mapped enum (or LoggedOut on error). */
+	void QueryAuthState(TFunction<void(EUETwitchAuthStatus)> OnDone);
+
+	/** Timer-driven poll body used while WaitingForCode. */
+	void PollAuthState();
+
 	// Title -> RewardKey routing table (built from the last synced pack)
 	TMap<FString, FName> RewardIdToKey;
 	TMap<FString, FName> RewardTitleToKey;

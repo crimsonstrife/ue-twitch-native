@@ -29,7 +29,9 @@ public class UETwitchNative : ModuleRules
 				"CoreUObject",
 				"Engine",
 				"DeveloperSettings",
-				"HTTP"
+				"HTTP",
+				"UMG",
+				"ApplicationCore"
 				// ... add other public dependencies that you statically link with here ...
 			}
 			);

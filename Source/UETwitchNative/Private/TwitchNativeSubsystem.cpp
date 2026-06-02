@@ -4,12 +4,14 @@
 #include "TwitchNativeSaveGame.h"
 #include "Misc/Paths.h"
 #include "HAL/PlatformProcess.h"
-#include "Containers/StringConv.h" 
+#include "Containers/StringConv.h"
 #include "Async/Async.h"
 #include "Modules/ModuleManager.h"
 #include "HttpModule.h"
 #include "Interfaces/IHttpRequest.h"
 #include "Interfaces/IHttpResponse.h"
+#include "Engine/GameInstance.h"
+#include "TimerManager.h"
 
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonSerializer.h"
@@ -75,12 +77,118 @@ static std::wstring BuildOAuthScopesW(const TArray<FTwitchSDKOAuthScope>& Scopes
 void UTwitchNativeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
+
+	// Query persisted credentials. If LoggedIn, surface state immediately and pull user info so consumers
+	// (and bAutoSyncRewardsOnLogin) react. Otherwise, optionally kick off a silent auto-connect.
+	QueryAuthState([this](EUETwitchAuthStatus Status)
+	{
+		SetStatus(Status);
+
+		if (Status == EUETwitchAuthStatus::LoggedIn)
+		{
+			WaitForLoginAndFetchUserInfo();
+			return;
+		}
+
+		const UTwitchNativeSettings* Settings = UTwitchNativeSettings::Get();
+		if (Settings && Settings->bAutoConnectOnStartup)
+		{
+			ConnectUsingProjectSettings(/*bAutoLaunchBrowser=*/false);
+		}
+	});
 }
 
 void UTwitchNativeSubsystem::Deinitialize()
 {
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		GI->GetTimerManager().ClearTimer(AuthPollHandle);
+	}
 	StopListeningForCustomRewards();
 	Super::Deinitialize();
+}
+
+void UTwitchNativeSubsystem::SetStatus(EUETwitchAuthStatus NewStatus)
+{
+	if (NewStatus == CurrentStatus)
+	{
+		return;
+	}
+	CurrentStatus = NewStatus;
+	OnAuthStatusChanged.Broadcast(NewStatus);
+}
+
+void UTwitchNativeSubsystem::QueryAuthState(TFunction<void(EUETwitchAuthStatus)> OnDone)
+{
+	if (!IsTwitchSdkAvailable())
+	{
+		if (OnDone) OnDone(EUETwitchAuthStatus::LoggedOut);
+		return;
+	}
+
+	auto Core = FModuleManager::GetModuleChecked<FTwitchSDKModule>("TwitchSDK").Core;
+	TWeakObjectPtr<UTwitchNativeSubsystem> WeakThis(this);
+
+	Core->GetAuthState(
+		[WeakThis, OnDone](const TwitchSDK::AuthState& State)
+		{
+			const EUETwitchAuthStatus Mapped = static_cast<EUETwitchAuthStatus>(static_cast<uint8>(State.Status));
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, OnDone, Mapped]()
+			{
+				if (!WeakThis.IsValid()) return;
+				if (OnDone) OnDone(Mapped);
+			});
+		},
+		[WeakThis, OnDone](const std::exception& E)
+		{
+			const FString Msg = FString::Printf(TEXT("GetAuthState failed: %s"), UTF8_TO_TCHAR(E.what()));
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, OnDone, Msg]()
+			{
+				if (!WeakThis.IsValid()) return;
+				WeakThis->OnTwitchError.Broadcast(Msg);
+				if (OnDone) OnDone(EUETwitchAuthStatus::LoggedOut);
+			});
+		}
+	);
+}
+
+void UTwitchNativeSubsystem::RefreshAuthStatus()
+{
+	QueryAuthState([this](EUETwitchAuthStatus Status) { SetStatus(Status); });
+}
+
+void UTwitchNativeSubsystem::PollAuthState()
+{
+	QueryAuthState([this](EUETwitchAuthStatus Status)
+	{
+		switch (Status)
+		{
+		case EUETwitchAuthStatus::LoggedIn:
+			if (UGameInstance* GI = GetGameInstance())
+			{
+				GI->GetTimerManager().ClearTimer(AuthPollHandle);
+			}
+			SetStatus(EUETwitchAuthStatus::LoggedIn);
+			WaitForLoginAndFetchUserInfo();
+			break;
+
+		case EUETwitchAuthStatus::LoggedOut:
+			// Twitch device codes expire after ~15 min; we cap at 10 to give the user a buffer to retry.
+			if (FPlatformTime::Seconds() - DeviceCodeFlowStartedSeconds > 600.0)
+			{
+				if (UGameInstance* GI = GetGameInstance())
+				{
+					GI->GetTimerManager().ClearTimer(AuthPollHandle);
+				}
+				SetStatus(EUETwitchAuthStatus::LoggedOut);
+				OnTwitchError.Broadcast(TEXT("Device code expired before authorization."));
+			}
+			break;
+
+		default:
+			break;
+		}
+	});
 }
 
 bool UTwitchNativeSubsystem::IsTwitchSdkAvailable() const
@@ -101,6 +209,14 @@ void UTwitchNativeSubsystem::RequestAuthenticationInfo(const TArray<FTwitchSDKOA
 		OnTwitchError.Broadcast(TEXT("TwitchSDK module/Core not available."));
 		return;
 	}
+
+	// Re-entry guard: a second click while we're still negotiating shouldn't start a parallel poll.
+	if (CurrentStatus == EUETwitchAuthStatus::Loading || CurrentStatus == EUETwitchAuthStatus::WaitingForCode)
+	{
+		return;
+	}
+
+	SetStatus(EUETwitchAuthStatus::Loading);
 
 	auto Core = FModuleManager::GetModuleChecked<FTwitchSDKModule>("TwitchSDK").Core;
 	TWeakObjectPtr<UTwitchNativeSubsystem> WeakThis(this);
@@ -130,12 +246,29 @@ void UTwitchNativeSubsystem::RequestAuthenticationInfo(const TArray<FTwitchSDKOA
 					FPlatformProcess::LaunchURL(*Out.Uri, nullptr, nullptr);
 				}
 
+				// Publish the code/URI before flipping status so listeners that read cached info
+				// on the status-change handler see the real values rather than a brief empty state.
+				WeakThis->OnAuthInfoReceived.Broadcast(Out);
+
 				if (Out.bAlreadyAuthenticated)
 				{
+					WeakThis->SetStatus(EUETwitchAuthStatus::LoggedIn);
 					WeakThis->WaitForLoginAndFetchUserInfo();
 				}
-
-				WeakThis->OnAuthInfoReceived.Broadcast(Out);
+				else
+				{
+					WeakThis->DeviceCodeFlowStartedSeconds = FPlatformTime::Seconds();
+					if (UGameInstance* GI = WeakThis->GetGameInstance())
+					{
+						GI->GetTimerManager().SetTimer(
+							WeakThis->AuthPollHandle,
+							FTimerDelegate::CreateUObject(WeakThis.Get(), &UTwitchNativeSubsystem::PollAuthState),
+							3.0f,
+							/*bLoop=*/true,
+							/*FirstDelay=*/3.0f);
+					}
+					WeakThis->SetStatus(EUETwitchAuthStatus::WaitingForCode);
+				}
 			});
 		},
 		[WeakThis](const std::exception& E)
@@ -145,10 +278,9 @@ void UTwitchNativeSubsystem::RequestAuthenticationInfo(const TArray<FTwitchSDKOA
 			const FString Msg = FString::Printf(TEXT("GetAuthenticationInfo failed: %s"), UTF8_TO_TCHAR(E.what()));
 			AsyncTask(ENamedThreads::GameThread, [WeakThis, Msg]()
 			{
-				if (WeakThis.IsValid())
-				{
-					WeakThis->OnTwitchError.Broadcast(Msg);
-				}
+				if (!WeakThis.IsValid()) return;
+				WeakThis->SetStatus(EUETwitchAuthStatus::LoggedOut);
+				WeakThis->OnTwitchError.Broadcast(Msg);
 			});
 		}
 	);
@@ -297,11 +429,23 @@ void UTwitchNativeSubsystem::LogOut()
 {
 	if (!IsTwitchSdkAvailable()) return;
 
+	// Cancel any in-flight device-code poll up front so a logout during WaitingForCode is honored immediately.
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		GI->GetTimerManager().ClearTimer(AuthPollHandle);
+	}
+
 	auto Core = FModuleManager::GetModuleChecked<FTwitchSDKModule>("TwitchSDK").Core;
 	TWeakObjectPtr<UTwitchNativeSubsystem> WeakThis(this);
 
 	Core->LogOut(
-		[](){},
+		[WeakThis]()
+		{
+			AsyncTask(ENamedThreads::GameThread, [WeakThis]()
+			{
+				if (WeakThis.IsValid()) WeakThis->SetStatus(EUETwitchAuthStatus::LoggedOut);
+			});
+		},
 		[WeakThis](const std::exception& E)
 		{
 			if (!WeakThis.IsValid()) return;
