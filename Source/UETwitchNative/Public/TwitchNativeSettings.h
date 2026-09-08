@@ -29,4 +29,12 @@ public:
 
 	UPROPERTY(Config, EditAnywhere, Category="Rewards")
 	bool bClearRewardsOnShutdown = true;
+
+	/**
+	 * Twitch's channel-wide cap on custom rewards. Counts enabled AND disabled rewards from
+	 * every source, not just ones this app created. Exposed rather than hardcoded so it can be
+	 * corrected if Twitch changes it, without a code change.
+	 */
+	UPROPERTY(Config, EditAnywhere, Category="Rewards", meta=(ClampMin=1, UIMin=1))
+	int32 ChannelRewardCap = 50;
 };

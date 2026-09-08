@@ -44,8 +44,37 @@ struct FTwitchUserInfoBP
 	UPROPERTY(BlueprintReadOnly) FString UserId;
 	UPROPERTY(BlueprintReadOnly) FString Login;
 	UPROPERTY(BlueprintReadOnly) FString DisplayName;
+
+	/** URL of the account's avatar. Feed to UMG's "Download Image" async node to get a texture. */
+	UPROPERTY(BlueprintReadOnly) FString ProfileImageUrl;
+
+	/** "partner", "affiliate", or empty. */
+	UPROPERTY(BlueprintReadOnly) FString BroadcasterType;
 };
 
+/** How the channel's custom-reward cap is currently being consumed. */
+USTRUCT(BlueprintType)
+struct FTwitchRewardSlotUsage
+{
+	GENERATED_BODY()
+
+	/** Channel-wide cap, from UTwitchNativeSettings::ChannelRewardCap. */
+	UPROPERTY(BlueprintReadOnly) int32 Cap = 0;
+
+	/** Rewards on the channel this app did not create - manual ones, other apps, orphans. */
+	UPROPERTY(BlueprintReadOnly) int32 UsedByOthers = 0;
+
+	/** Rewards on the channel created by this app's Client Id. */
+	UPROPERTY(BlueprintReadOnly) int32 UsedByThisApp = 0;
+
+	/** Slots this app could still fill. Cap minus everything already on the channel. */
+	UPROPERTY(BlueprintReadOnly) int32 Free = 0;
+
+	/** False when the numbers could not be fetched - treat the other fields as meaningless. */
+	UPROPERTY(BlueprintReadOnly) bool bValid = false;
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FTwitchRewardSlotsUpdated, const FTwitchRewardSlotUsage&, Usage);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FTwitchUserInfoReceived, const FTwitchUserInfoBP&, Info);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FTwitchAuthInfoReceived, const FTwitchAuthInfo&, Info);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FTwitchAuthStatusChanged, EUETwitchAuthStatus, NewStatus);

@@ -29,7 +29,6 @@ public class UETwitchNative : ModuleRules
 				"CoreUObject",
 				"Engine",
 				"DeveloperSettings",
-				"HTTP",
 				"UMG",
 				"ApplicationCore"
 				// ... add other public dependencies that you statically link with here ...
@@ -44,10 +43,7 @@ public class UETwitchNative : ModuleRules
 				"Engine",
 				"Slate",
 				"SlateCore",
-				"TwitchSDK",
-				"HTTP",
-				"Json",
-				"JsonUtilities"
+				"TwitchSDK"
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);

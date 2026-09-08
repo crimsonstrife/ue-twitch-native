@@ -11,6 +11,13 @@ struct FTwitchNativeRewardDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Twitch")
 	FName RewardKey;
 
+	/**
+	 * Optional grouping key for settings UI - e.g. "Flavor", "Helpful", "Hostile".
+	 * Purely organisational; the plugin never behaves differently based on it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Twitch")
+	FName Category;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Twitch")
 	FString Title;
 

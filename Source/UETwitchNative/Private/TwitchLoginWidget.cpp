@@ -1,36 +1,31 @@
 #include "TwitchLoginWidget.h"
 
-#include "TwitchNativeSubsystem.h"
-#include "Engine/GameInstance.h"
-#include "HAL/PlatformApplicationMisc.h"
+#include "TwitchLoginPresenter.h"
 
 void UTwitchLoginWidget::NativeOnInitialized()
 {
 	Super::NativeOnInitialized();
 
-	UTwitchNativeSubsystem* Subsystem = ResolveSubsystem();
-	if (!Subsystem)
-	{
-		return;
-	}
+	Presenter = NewObject<UTwitchLoginPresenter>(this);
+	Presenter->ErrorPanelIndex = ErrorPanelIndex;
 
-	Subsystem->OnAuthStatusChanged.AddDynamic(this, &UTwitchLoginWidget::HandleStatusChanged);
-	Subsystem->OnAuthInfoReceived.AddDynamic(this, &UTwitchLoginWidget::HandleAuthInfo);
-	Subsystem->OnUserInfoReceived.AddDynamic(this, &UTwitchLoginWidget::HandleUserInfo);
-	Subsystem->OnTwitchError.AddDynamic(this, &UTwitchLoginWidget::HandleError);
+	// Widgets first, so the priming pass inside Bind lands on a switcher that already exists.
+	Presenter->SetDrivenWidgets(WS_State, TXT_Error, CurrentUserDisplayName);
 
-	// Prime the view with whatever state the subsystem is already in.
-	HandleStatusChanged(Subsystem->GetAuthStatus());
+	Presenter->OnEnterLoggedOut.AddDynamic(this, &UTwitchLoginWidget::ForwardLoggedOut);
+	Presenter->OnEnterLoading.AddDynamic(this, &UTwitchLoginWidget::ForwardLoading);
+	Presenter->OnEnterWaitingForCode.AddDynamic(this, &UTwitchLoginWidget::ForwardWaitingForCode);
+	Presenter->OnEnterLoggedIn.AddDynamic(this, &UTwitchLoginWidget::ForwardLoggedIn);
+	Presenter->OnLoginError.AddDynamic(this, &UTwitchLoginWidget::ForwardError);
+
+	Presenter->Bind(this);
 }
 
 void UTwitchLoginWidget::NativeDestruct()
 {
-	if (UTwitchNativeSubsystem* Subsystem = ResolveSubsystem())
+	if (Presenter)
 	{
-		Subsystem->OnAuthStatusChanged.RemoveDynamic(this, &UTwitchLoginWidget::HandleStatusChanged);
-		Subsystem->OnAuthInfoReceived.RemoveDynamic(this, &UTwitchLoginWidget::HandleAuthInfo);
-		Subsystem->OnUserInfoReceived.RemoveDynamic(this, &UTwitchLoginWidget::HandleUserInfo);
-		Subsystem->OnTwitchError.RemoveDynamic(this, &UTwitchLoginWidget::HandleError);
+		Presenter->Unbind();
 	}
 
 	Super::NativeDestruct();
@@ -38,86 +33,60 @@ void UTwitchLoginWidget::NativeDestruct()
 
 void UTwitchLoginWidget::BeginLogin()
 {
-	if (UTwitchNativeSubsystem* Subsystem = ResolveSubsystem())
-	{
-		Subsystem->ConnectUsingProjectSettings(/*bAutoLaunchBrowser=*/true);
-	}
+	if (Presenter) Presenter->BeginLogin();
 }
 
 void UTwitchLoginWidget::Logout()
 {
-	if (UTwitchNativeSubsystem* Subsystem = ResolveSubsystem())
-	{
-		Subsystem->LogOut();
-	}
+	if (Presenter) Presenter->Logout();
 }
 
 void UTwitchLoginWidget::CopyCodeToClipboard()
 {
-	if (!LastAuthInfo.UserCode.IsEmpty())
-	{
-		FPlatformApplicationMisc::ClipboardCopy(*LastAuthInfo.UserCode);
-	}
+	if (Presenter) Presenter->CopyCodeToClipboard();
 }
 
 EUETwitchAuthStatus UTwitchLoginWidget::GetAuthStatus() const
 {
-	if (const UTwitchNativeSubsystem* Subsystem = ResolveSubsystem())
-	{
-		return Subsystem->GetAuthStatus();
-	}
-	return EUETwitchAuthStatus::LoggedOut;
+	return Presenter ? Presenter->GetAuthStatus() : EUETwitchAuthStatus::LoggedOut;
 }
 
-void UTwitchLoginWidget::HandleStatusChanged(EUETwitchAuthStatus NewStatus)
+FTwitchAuthInfo UTwitchLoginWidget::GetLastAuthInfo() const
 {
-	switch (NewStatus)
-	{
-	case EUETwitchAuthStatus::LoggedOut:
-		OnEnterLoggedOut();
-		break;
-	case EUETwitchAuthStatus::Loading:
-		OnEnterLoading();
-		break;
-	case EUETwitchAuthStatus::WaitingForCode:
-		OnEnterWaitingForCode(LastAuthInfo.Uri, LastAuthInfo.UserCode);
-		break;
-	case EUETwitchAuthStatus::LoggedIn:
-		OnEnterLoggedIn(LastUserInfo);
-		break;
-	}
+	return Presenter ? Presenter->GetLastAuthInfo() : FTwitchAuthInfo();
 }
 
-void UTwitchLoginWidget::HandleAuthInfo(const FTwitchAuthInfo& Info)
+FTwitchUserInfoBP UTwitchLoginWidget::GetLastUserInfo() const
 {
-	LastAuthInfo = Info;
-	// If we're already in WaitingForCode the OnEnter event already fired with stale (empty) info — re-emit
-	// now that we have the real Uri/UserCode.
-	if (GetAuthStatus() == EUETwitchAuthStatus::WaitingForCode)
-	{
-		OnEnterWaitingForCode(Info.Uri, Info.UserCode);
-	}
+	return Presenter ? Presenter->GetLastUserInfo() : FTwitchUserInfoBP();
 }
 
-void UTwitchLoginWidget::HandleUserInfo(const FTwitchUserInfoBP& Info)
+FString UTwitchLoginWidget::GetLastErrorMessage() const
 {
-	LastUserInfo = Info;
-	if (GetAuthStatus() == EUETwitchAuthStatus::LoggedIn)
-	{
-		OnEnterLoggedIn(Info);
-	}
+	return Presenter ? Presenter->GetLastErrorMessage() : FString();
 }
 
-void UTwitchLoginWidget::HandleError(const FString& Message)
+void UTwitchLoginWidget::ForwardLoggedOut()
+{
+	OnEnterLoggedOut();
+}
+
+void UTwitchLoginWidget::ForwardLoading()
+{
+	OnEnterLoading();
+}
+
+void UTwitchLoginWidget::ForwardWaitingForCode(const FString& Uri, const FString& UserCode)
+{
+	OnEnterWaitingForCode(Uri, UserCode);
+}
+
+void UTwitchLoginWidget::ForwardLoggedIn(const FTwitchUserInfoBP& User)
+{
+	OnEnterLoggedIn(User);
+}
+
+void UTwitchLoginWidget::ForwardError(const FString& Message)
 {
 	OnLoginError(Message);
-}
-
-UTwitchNativeSubsystem* UTwitchLoginWidget::ResolveSubsystem() const
-{
-	if (UGameInstance* GI = GetGameInstance())
-	{
-		return GI->GetSubsystem<UTwitchNativeSubsystem>();
-	}
-	return nullptr;
 }
