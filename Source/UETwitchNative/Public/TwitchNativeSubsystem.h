@@ -45,6 +45,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Twitch")
 	void LogOut();
 
+	/**
+	 * Abandon a login that is still negotiating and return to LoggedOut.
+	 *
+	 * The SDK has no cancel for its device-code poll: CheckAuthenticationState reschedules itself
+	 * every few seconds until the code expires (~30 min), captured on a module-scoped Core that
+	 * outlives the game instance. Invalidating the SDK's cached auth info via LogOut is the only
+	 * lever that stops it. Safe to call when nothing is pending.
+	 */
+	UFUNCTION(BlueprintCallable, Category="Twitch")
+	void CancelPendingLogin();
+
 	UFUNCTION(BlueprintCallable, Category="Twitch")
 	void ConnectUsingProjectSettings(bool bAutoLaunchBrowser = true);
 

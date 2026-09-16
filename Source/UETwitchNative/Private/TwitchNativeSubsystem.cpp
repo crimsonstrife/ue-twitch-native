@@ -78,13 +78,24 @@ void UTwitchNativeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	// (and bAutoSyncRewardsOnLogin) react. Otherwise, optionally kick off a silent auto-connect.
 	QueryAuthState([this](EUETwitchAuthStatus Status)
 	{
-		SetStatus(Status);
-
 		if (Status == EUETwitchAuthStatus::LoggedIn)
 		{
+			SetStatus(Status);
 			WaitForLoginAndFetchUserInfo();
 			return;
 		}
+
+		// A previous run that ended mid-login leaves the SDK still polling and still reporting
+		// WaitingForCode, but we have no Uri/UserCode for it - the login panel would come up blank
+		// and the Connect button would be blocked by its own re-entry guard. Discard it instead.
+		if (Status == EUETwitchAuthStatus::WaitingForCode || Status == EUETwitchAuthStatus::Loading)
+		{
+			UE_LOG(LogTwitchNative, Log, TEXT("Discarding a login left pending by a previous session."));
+			CancelPendingLogin();
+			return;
+		}
+
+		SetStatus(Status);
 
 		const UTwitchNativeSettings* Settings = UTwitchNativeSettings::Get();
 		if (Settings && Settings->bAutoConnectOnStartup)
@@ -99,6 +110,14 @@ void UTwitchNativeSubsystem::Deinitialize()
 	if (UGameInstance* GI = GetGameInstance())
 	{
 		GI->GetTimerManager().ClearTimer(AuthPollHandle);
+	}
+
+	// Don't leave a half-finished login polling after we're gone: the SDK's loop re-arms itself
+	// off a Core that outlives this subsystem, so it would keep issuing requests for up to the
+	// device code's full lifetime.
+	if (CurrentStatus == EUETwitchAuthStatus::Loading || CurrentStatus == EUETwitchAuthStatus::WaitingForCode)
+	{
+		CancelPendingLogin();
 	}
 
 	// The SDK asks that a game withdraw any rewards it enabled when it terminates, otherwise they
@@ -553,6 +572,28 @@ static TwitchSDK::CustomRewardDefinition BuildSdkRewardDefinition(
 	Out.ShouldRedemptionsSkipRequestQueue = Def.bSkipQueue;
 
 	return Out;
+}
+
+void UTwitchNativeSubsystem::CancelPendingLogin()
+{
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		GI->GetTimerManager().ClearTimer(AuthPollHandle);
+	}
+
+	bPendingAutoLaunchBrowser   = false;
+	bLaunchedBrowserForThisAuth = false;
+
+	// Only LogOut invalidates the SDK's cached AuthInfo, and that invalidation is what makes the
+	// next iteration of its device-code loop throw and stop. There is no dedicated cancel.
+	// Safe even mid-flow: WaitingForCode means no session exists yet, so nothing good is lost.
+	if (IsTwitchSdkAvailable())
+	{
+		auto Core = FModuleManager::GetModuleChecked<FTwitchSDKModule>("TwitchSDK").Core;
+		Core->LogOut([]() {}, [](const std::exception&) {});
+	}
+
+	SetStatus(EUETwitchAuthStatus::LoggedOut);
 }
 
 void UTwitchNativeSubsystem::SyncCustomRewardsFromPack(UTwitchNativeRewardPack* Pack)
