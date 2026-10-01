@@ -1,4 +1,4 @@
-﻿#include "TwitchNativeSubsystem.h"
+#include "TwitchNativeSubsystem.h"
 
 #include "TwitchNativeRewardPack.h"
 #include "TwitchNativeSaveGame.h"
@@ -134,14 +134,17 @@ void UTwitchNativeSubsystem::Deinitialize()
 
 void UTwitchNativeSubsystem::SetStatus(EUETwitchAuthStatus NewStatus)
 {
-	if (NewStatus == CurrentStatus)
-	{
-		return;
-	}
-	CurrentStatus = NewStatus;
-	OnAuthStatusChanged.Broadcast(NewStatus);
+    if (NewStatus == CurrentStatus) return;
+    if (NewStatus != EUETwitchAuthStatus::LoggedIn)
+    {
+        ++AuthGeneration;
+        ++RewardPublishGeneration;
+        QueuedRewardKeys.Reset();
+        BroadcasterId.Reset();
+    }
+    CurrentStatus = NewStatus;
+    OnAuthStatusChanged.Broadcast(NewStatus);
 }
-
 void UTwitchNativeSubsystem::QueryAuthState(TFunction<void(EUETwitchAuthStatus)> OnDone)
 {
 	if (!IsTwitchSdkAvailable())
@@ -409,9 +412,10 @@ void UTwitchNativeSubsystem::WaitForLoginAndFetchUserInfo()
 
 	auto Core = FModuleManager::GetModuleChecked<FTwitchSDKModule>("TwitchSDK").Core;
 	TWeakObjectPtr<UTwitchNativeSubsystem> WeakThis(this);
+	const uint64 Generation = AuthGeneration;
 
 	Core->GetMyUserInfo(
-		[WeakThis](const TwitchSDK::UserInfo& Info)
+		[WeakThis, Generation](const TwitchSDK::UserInfo& Info)
 		{
 			if (!WeakThis.IsValid()) return;
 
@@ -422,13 +426,21 @@ void UTwitchNativeSubsystem::WaitForLoginAndFetchUserInfo()
 			Out.ProfileImageUrl = TwitchSDK::ToFString(Info.ProfileImageUrl);
 			Out.BroadcasterType = TwitchSDK::ToFString(Info.BroadcasterType);
 
-			WeakThis->BroadcasterId = Out.UserId; 
+			// Identity is assigned on the game thread after validating the auth generation.
 
-			AsyncTask(ENamedThreads::GameThread, [WeakThis, Out]()
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, Out, Generation]()
 			{
 				if (!WeakThis.IsValid()) return;
 
-				WeakThis->OnUserInfoReceived.Broadcast(Out);
+				if (WeakThis->AuthGeneration != Generation || !WeakThis->IsLoggedIn()) return;
+                if (!WeakThis->BroadcasterId.IsEmpty() && WeakThis->BroadcasterId != Out.UserId)
+                {
+                    ++WeakThis->AuthGeneration;
+                    ++WeakThis->RewardPublishGeneration;
+                    WeakThis->QueuedRewardKeys.Reset();
+                }
+                WeakThis->BroadcasterId = Out.UserId;
+                WeakThis->OnUserInfoReceived.Broadcast(Out);
 
 				const UTwitchNativeSettings* Settings = UTwitchNativeSettings::Get();
 				if (Settings && Settings->bAutoSyncRewardsOnLogin)
@@ -613,6 +625,9 @@ void UTwitchNativeSubsystem::SyncCustomRewardsFromPack(UTwitchNativeRewardPack* 
 	// Rebuild routing before publishing, so a redemption landing immediately after the
 	// call completes already has somewhere to go.
 	RewardTitleToKey.Reset();
+	QueuedRewardKeys.Reset();
+	const uint64 Generation = ++RewardPublishGeneration;
+	TSet<FName> DesiredQueuedKeys;
 
 	TwitchSDK::CustomRewardList List;
 	List.Rewards.reserve(Pack->Rewards.Num());
@@ -631,6 +646,7 @@ void UTwitchNativeSubsystem::SyncCustomRewardsFromPack(UTwitchNativeRewardPack* 
 		if (!Def.RewardKey.IsNone())
 		{
 			RewardTitleToKey.Add(FullTitle, Def.RewardKey);
+			if (!Def.bSkipQueue) DesiredQueuedKeys.Add(Def.RewardKey);
 		}
 
 		List.Rewards.push_back(BuildSdkRewardDefinition(Def, FullTitle));
@@ -642,11 +658,12 @@ void UTwitchNativeSubsystem::SyncCustomRewardsFromPack(UTwitchNativeRewardPack* 
 
 	Core->ReplaceCustomRewards(
 		List,
-		[WeakThis, Count]()
+		[WeakThis, Count, Generation, DesiredQueuedKeys]()
 		{
-			AsyncTask(ENamedThreads::GameThread, [WeakThis, Count]()
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, Count, Generation, DesiredQueuedKeys]()
 			{
-				if (!WeakThis.IsValid()) return;
+				if (!WeakThis.IsValid() || WeakThis->RewardPublishGeneration != Generation) return;
+				WeakThis->QueuedRewardKeys = DesiredQueuedKeys;
 				WeakThis->bHasPublishedRewards = (Count > 0);
 				UE_LOG(LogTwitchNative, Log, TEXT("Published %d custom reward(s)."), Count);
 			});
@@ -670,6 +687,8 @@ void UTwitchNativeSubsystem::ClearCustomRewards()
 	}
 
 	RewardTitleToKey.Reset();
+	QueuedRewardKeys.Reset();
+	++RewardPublishGeneration;
 
 	auto Core = FModuleManager::GetModuleChecked<FTwitchSDKModule>("TwitchSDK").Core;
 	TWeakObjectPtr<UTwitchNativeSubsystem> WeakThis(this);
@@ -695,45 +714,44 @@ void UTwitchNativeSubsystem::ClearCustomRewards()
 	);
 }
 
-void UTwitchNativeSubsystem::ResolveRedemption(const FString& RedemptionId, const FString& RewardId, bool bFulfill)
+void UTwitchNativeSubsystem::NotifyRedemptionResolved(const FString& RedemptionId, const FString& RewardId, bool bFulfill, bool bSucceeded, const FString& Error)
 {
-	if (!IsTwitchSdkAvailable())
-	{
-		OnTwitchError.Broadcast(TEXT("TwitchSDK module/Core not available."));
-		return;
-	}
-
-	if (BroadcasterId.IsEmpty())
-	{
-		OnTwitchError.Broadcast(TEXT("Cannot resolve a redemption before user info has been fetched."));
-		return;
-	}
-
-	TwitchSDK::CustomRewardResolveRequest Req;
-	Req.RedemptionId   = ToTwitchHolder(RedemptionId);
-	Req.CustomRewardId = ToTwitchHolder(RewardId);
-	Req.BroadcasterId  = ToTwitchHolder(BroadcasterId);
-	Req.Resolution     = bFulfill
-		? TwitchSDK::CustomRewardRedemptionState::Fulfilled
-		: TwitchSDK::CustomRewardRedemptionState::Canceled;
-
-	auto Core = FModuleManager::GetModuleChecked<FTwitchSDKModule>("TwitchSDK").Core;
-	TWeakObjectPtr<UTwitchNativeSubsystem> WeakThis(this);
-
-	Core->ResolveCustomReward(
-		Req,
-		[]() {},
-		[WeakThis](const std::exception& E)
-		{
-			const FString Msg = FString::Printf(TEXT("ResolveCustomReward failed: %s"), UTF8_TO_TCHAR(E.what()));
-			AsyncTask(ENamedThreads::GameThread, [WeakThis, Msg]()
-			{
-				if (WeakThis.IsValid()) WeakThis->OnTwitchError.Broadcast(Msg);
-			});
-		}
-	);
+    OnRedemptionResolvedNative.Broadcast(RedemptionId, RewardId, bFulfill, bSucceeded, Error);
+    OnRedemptionResolved.Broadcast(RedemptionId, RewardId, bFulfill, bSucceeded, Error);
+    if (!bSucceeded) OnTwitchError.Broadcast(Error);
 }
 
+void UTwitchNativeSubsystem::ResolveRedemption(const FString& RedemptionId, const FString& RewardId, bool bFulfill)
+{
+    if (RedemptionId.IsEmpty() || RewardId.IsEmpty() || !IsTwitchSdkAvailable() || !IsLoggedIn() || BroadcasterId.IsEmpty())
+    {
+        NotifyRedemptionResolved(RedemptionId, RewardId, bFulfill, false, TEXT("Cannot resolve redemption: missing IDs, SDK or broadcaster user info."));
+        return;
+    }
+    TwitchSDK::CustomRewardResolveRequest Req;
+    Req.RedemptionId = ToTwitchHolder(RedemptionId);
+    Req.CustomRewardId = ToTwitchHolder(RewardId);
+    Req.BroadcasterId = ToTwitchHolder(BroadcasterId);
+    Req.Resolution = bFulfill ? TwitchSDK::CustomRewardRedemptionState::Fulfilled : TwitchSDK::CustomRewardRedemptionState::Canceled;
+    auto Core = FModuleManager::GetModuleChecked<FTwitchSDKModule>("TwitchSDK").Core;
+    TWeakObjectPtr<UTwitchNativeSubsystem> WeakThis(this);
+    Core->ResolveCustomReward(Req,
+        [WeakThis, RedemptionId, RewardId, bFulfill]()
+        {
+            AsyncTask(ENamedThreads::GameThread, [WeakThis, RedemptionId, RewardId, bFulfill]()
+            {
+                if (WeakThis.IsValid()) WeakThis->NotifyRedemptionResolved(RedemptionId, RewardId, bFulfill, true, FString());
+            });
+        },
+        [WeakThis, RedemptionId, RewardId, bFulfill](const std::exception& E)
+        {
+            const FString Msg = FString::Printf(TEXT("ResolveCustomReward failed: %s"), UTF8_TO_TCHAR(E.what()));
+            AsyncTask(ENamedThreads::GameThread, [WeakThis, RedemptionId, RewardId, bFulfill, Msg]()
+            {
+                if (WeakThis.IsValid()) WeakThis->NotifyRedemptionResolved(RedemptionId, RewardId, bFulfill, false, Msg);
+            });
+        });
+}
 // ---------------------------------------------------------------------------
 // Reward selection
 // ---------------------------------------------------------------------------

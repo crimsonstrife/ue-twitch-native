@@ -168,3 +168,10 @@ async node to get a texture.
 ## License
 
 MIT. Copyright 2026 Patrick Barnhardt.
+
+`OnRedemptionResolved` now reports correlated redemption id, reward id, requested
+fulfillment/cancellation, SDK success, and error text. Dispatch alone is not
+confirmation; failed calls remain the caller's responsibility to reconcile.
+`IsQueuedRewardKey` is a native eligibility query for rewards successfully
+published by this subsystem with `bSkipQueue=false`. Eligibility is cleared
+during publication/withdrawal, and stale callbacks cannot restore it.

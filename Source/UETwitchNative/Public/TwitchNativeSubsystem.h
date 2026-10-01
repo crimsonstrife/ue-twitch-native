@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "TwitchNativeRewardPack.h"
 
@@ -189,7 +189,19 @@ public:
 	UPROPERTY(BlueprintAssignable, Category="Twitch")
 	FTwitchCustomRewardRedeemed OnCustomRewardRedeemed;
 
+    UPROPERTY(BlueprintAssignable, Category="Twitch")
+    FTwitchRedemptionResolved OnRedemptionResolved;
+    FTwitchRedemptionResolvedNative OnRedemptionResolvedNative;
+
+    /** Only rewards published by this subsystem with bSkipQueue=false qualify. */
+    bool IsQueuedRewardKey(FName Key) const { return QueuedRewardKeys.Contains(Key); }
+    uint64 GetAuthGeneration() const { return AuthGeneration; }
+
 private:
+    TSet<FName> QueuedRewardKeys;
+    uint64 RewardPublishGeneration = 0;
+    uint64 AuthGeneration = 0;
+    void NotifyRedemptionResolved(const FString& RedemptionId, const FString& RewardId, bool bFulfill, bool bSucceeded, const FString& Error);
 	// Auth state machine
 	EUETwitchAuthStatus CurrentStatus = EUETwitchAuthStatus::LoggedOut;
 	FTimerHandle AuthPollHandle;

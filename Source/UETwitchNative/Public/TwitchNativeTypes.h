@@ -85,3 +85,6 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
 	FName, RewardKey,
 	const FTwitchCustomRewardEvent&, Event
 );
+/** bSucceeded confirms SDK completion, not merely that resolution was dispatched. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(FTwitchRedemptionResolved, const FString&, RedemptionId, const FString&, RewardId, bool, bFulfill, bool, bSucceeded, const FString&, Error);
+DECLARE_MULTICAST_DELEGATE_FiveParams(FTwitchRedemptionResolvedNative, const FString&, const FString&, bool, bool, const FString&);
